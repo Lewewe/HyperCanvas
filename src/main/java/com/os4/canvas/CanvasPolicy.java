@@ -4,6 +4,7 @@ import java.net.URI;
 
 /** Only Spotify track identities and HTTPS media CDN URLs cross the extension bridge. */
 final class CanvasPolicy {
+    static boolean enabled(boolean requested, boolean blocked) { return requested && !blocked; }
     /** Keep a loaded session through buffering/seeking instead of rebuilding its scene. */
     static boolean acceptPlaybackState(int state, boolean currentSession) {
         return state == 2 || state == 3 || state == 4 || state == 5 || state == 6 || state == 8

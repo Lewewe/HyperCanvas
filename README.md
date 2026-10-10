@@ -23,7 +23,7 @@ Spotify Canvas backgrounds for the HyperOS 4 lock screen, built as a separate LS
 4. Restart the affected processes or reboot, then enable HyperCanvas in **HyperMusicCover-Enhanced → Extensions**.
 5. Open a track with Canvas in Spotify’s Now Playing screen so Spotify exposes its Canvas data, then lock the screen.
 
-Settings are managed inside HyperMusicCover-Enhanced; HyperCanvas has no separate settings screen. Spotify must provide a Canvas for the track. The extension does not generate missing videos or guarantee that an unseen track’s Canvas can be fetched in advance.
+Settings are managed inside HyperMusicCover-Enhanced; HyperCanvas has no separate settings screen. Enabling **Use wallpaper background** in the host temporarily suspends HyperCanvas and disables its switch. Turning that mode off restores your previous HyperCanvas choice; changing the mode restarts Spotify and SystemUI when the extension is installed. Spotify must provide a Canvas for the track. The extension does not generate missing videos or guarantee that an unseen track’s Canvas can be fetched in advance.
 
 ## How it works
 

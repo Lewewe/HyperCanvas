@@ -39,19 +39,28 @@ public final class CanvasProvider extends ContentProvider {
     private boolean host() {
         return caller(HOST) && getContext().getPackageManager().checkSignatures(HOST, getContext().getPackageName()) == android.content.pm.PackageManager.SIGNATURE_MATCH;
     }
+    private boolean enabled() {
+        return CanvasPolicy.enabled(prefs.getBoolean("enabled", false), prefs.getBoolean("hostBlocked", false));
+    }
     @Override public synchronized Bundle call(String method, String arg, Bundle data) {
         boolean own = Binder.getCallingUid() == android.os.Process.myUid();
         boolean host = host(), spotify = caller("com.spotify.music"), system = caller("com.android.systemui");
         if (!own && !host && !spotify && !system) throw new SecurityException("Untrusted Canvas bridge caller");
         Bundle out = new Bundle();
-        if ("configure".equals(method)) {
+        if ("block".equals(method)) {
+            if (!host && !own) throw new SecurityException("Only the host can block Canvas");
+            if (data != null) {
+                prefs.edit().putBoolean("hostBlocked", data.getBoolean("hostBlocked")).commit();
+                getContext().getContentResolver().notifyChange(URI, null);
+            }
+        } else if ("configure".equals(method)) {
             if (!host && !own) throw new SecurityException("Only the host can configure Canvas");
             if (data != null) prefs.edit().putBoolean("enabled", data.getBoolean("enabled"))
                 .putBoolean("showInPill", data.getBoolean("showInPill"))
                 .putInt("dim", Math.max(0, Math.min(80, data.getInt("dim", 35))))
                 .putInt("blur", Math.max(0, Math.min(40, data.getInt("blur", 18))))
                 .putInt("coverDim", Math.max(0, Math.min(80, data.getInt("coverDim", 45)))).apply();
-            if (data != null && data.getBoolean("enabled")) {
+            if (enabled()) {
                 grantBridgeVisibility(getContext());
                 ScopeRequester.request();
             }
@@ -71,7 +80,7 @@ public final class CanvasProvider extends ContentProvider {
             java.util.LinkedHashSet<String> tracks = CanvasPolicy.window(arg,
                     data == null ? null : data.getString("previous"),
                     data == null ? null : data.getString("next"), recent);
-            if (!tracks.isEmpty() && prefs.getBoolean("enabled", false)) {
+            if (!tracks.isEmpty() && enabled()) {
                 prefs.edit().putString("recentTracks", new org.json.JSONArray(tracks).toString()).apply();
                 CanvasCache.window(getContext(), tracks);
                 try {
@@ -88,7 +97,7 @@ public final class CanvasProvider extends ContentProvider {
             if (!spotify) throw new SecurityException("Only Spotify can publish Canvas");
             String track = CanvasPolicy.track(data == null ? null : data.getString("track"));
             String url = data == null ? null : data.getString("url");
-            if (prefs.getBoolean("enabled", false) && !track.isEmpty() && CanvasCache.allowed(track) && CanvasPolicy.video(url)) {
+            if (enabled() && !track.isEmpty() && CanvasCache.allowed(track) && CanvasPolicy.video(url)) {
                 try {
                     JSONObject entries = new JSONObject(prefs.getString("entries", "{}"));
                     entries.remove(track);
@@ -104,7 +113,9 @@ public final class CanvasProvider extends ContentProvider {
             prefs.edit().putLong(spotify ? "spotifySeen" : "systemSeen", System.currentTimeMillis()).apply();
         } else if (!"query".equals(method)) throw new IllegalArgumentException("Unknown Canvas operation");
         out.putBoolean("installed", true);
-        out.putBoolean("enabled", prefs.getBoolean("enabled", false));
+        out.putBoolean("hostBlocked", prefs.getBoolean("hostBlocked", false));
+        out.putBoolean("requestedEnabled", prefs.getBoolean("enabled", false));
+        out.putBoolean("enabled", enabled());
         out.putBoolean("showInPill", prefs.getBoolean("showInPill", false));
         out.putInt("dim", prefs.getInt("dim", 35));
         out.putInt("blur", prefs.getInt("blur", 18));
@@ -118,7 +129,7 @@ public final class CanvasProvider extends ContentProvider {
             File[] cached = new File(getContext().getCacheDir(), "canvas-videos").listFiles((dir, name) -> name.endsWith(".mp4"));
             out.putInt("count", cached == null ? 0 : cached.length);
             String track = CanvasPolicy.track(arg);
-            if (!track.isEmpty() && prefs.getBoolean("enabled", false)) {
+            if (!track.isEmpty() && enabled()) {
                 File file = CanvasCache.file(getContext(), track);
                 String url = entries.optString(track);
                 if (file != null && file.isFile()) {
@@ -130,7 +141,7 @@ public final class CanvasProvider extends ContentProvider {
     }
     @Override public ParcelFileDescriptor openFile(Uri uri, String mode) throws FileNotFoundException {
         if ((!caller("com.android.systemui") && Binder.getCallingUid() != android.os.Process.myUid())
-                || !"r".equals(mode) || !prefs.getBoolean("enabled", false)) throw new FileNotFoundException("Canvas unavailable");
+                || !"r".equals(mode) || !enabled()) throw new FileNotFoundException("Canvas unavailable");
         java.util.List<String> path = uri.getPathSegments();
         if (path.size() != 2 || !"video".equals(path.get(0))) throw new FileNotFoundException("Invalid Canvas path");
         File file = CanvasCache.file(getContext(), path.get(1));

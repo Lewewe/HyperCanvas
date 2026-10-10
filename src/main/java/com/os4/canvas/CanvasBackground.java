@@ -290,6 +290,11 @@ final class CanvasBackground {
             @Override public void onReceive(Context c, Intent i) {
                 querying = false;
                 Bundle result = getResultExtras(false);
+                if (result != null && result.getBoolean("canvasBlocked")) {
+                    presentationVisible = false;
+                    clear();
+                    return;
+                }
                 large = result != null && result.getBoolean("canvasLarge");
                 bouncerVisible = result != null && result.getBoolean("canvasBouncer");
                 presentationVisible = result == null || result.getBoolean("canvasVisible", true);

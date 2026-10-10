@@ -11,6 +11,7 @@ import io.github.libxposed.api.XposedModule;
 /** Spotify extraction and SystemUI rendering are isolated from the host module's hooks. */
 public final class CanvasModule extends XposedModule {
     private Context context;
+    private volatile boolean suspended;
     private String processPackage;
     private int metadataSamples, bridgeRetries;
     private String playingTrack = "", previousTrack = "";
@@ -52,6 +53,14 @@ public final class CanvasModule extends XposedModule {
         if (context != null) return;
         context = app;
         trace("Application attached in " + pkg);
+        try {
+            Bundle config = context.getContentResolver().call(CanvasProvider.URI, "query", null, null);
+            suspended = config != null && config.getBoolean("hostBlocked");
+        } catch (RuntimeException ignored) { }
+        if (suspended) {
+            trace("Suspended by host background policy");
+            return;
+        }
         requestBridge();
         worker.schedule(() -> {
             try {
@@ -84,6 +93,7 @@ public final class CanvasModule extends XposedModule {
     private void spotify(ClassLoader loader) throws Exception {
         hook(android.media.session.MediaSession.class.getDeclaredMethod("setMetadata", android.media.MediaMetadata.class)).intercept(chain -> {
             Object result = chain.proceed();
+            if (suspended) return result;
             android.media.MediaMetadata metadata = (android.media.MediaMetadata) chain.getArg(0);
             String track = metadata == null ? "" : CanvasPolicy.track(metadata.getString(android.media.MediaMetadata.METADATA_KEY_MEDIA_ID));
             if (!track.isEmpty()) worker.execute(() -> {
@@ -108,6 +118,7 @@ public final class CanvasModule extends XposedModule {
             if (constructor.getParameterCount() < 4) continue;
             hook(constructor).intercept(chain -> {
                 Object result = chain.proceed();
+                if (suspended) return result;
                 Object rawTrack = chain.getArg(0), metadata = chain.getArg(2);
                 if (rawTrack instanceof String && metadata instanceof java.util.Map) {
                     String track = CanvasPolicy.track((String) rawTrack);
@@ -126,6 +137,7 @@ public final class CanvasModule extends XposedModule {
         entity.setAccessible(true); type.setAccessible(true);
         hook(canvas.getDeclaredMethod("getUrl")).intercept(chain -> {
             Object result = chain.proceed();
+            if (suspended) return result;
             try {
                 Object owner = chain.getThisObject();
                 String track = CanvasPolicy.track((String) entity.get(owner));
@@ -147,6 +159,7 @@ public final class CanvasModule extends XposedModule {
                 if (constructor.getParameterCount() != 12) continue;
                 hook(constructor).intercept(chain -> {
                     Object result = chain.proceed();
+                    if (suspended) return result;
                     Object rawTrack = chain.getArg(4), rawUrl = chain.getArg(1);
                     if (rawTrack instanceof String && rawUrl instanceof String) {
                         String track = CanvasPolicy.track((String) rawTrack), url = (String) rawUrl;
@@ -164,6 +177,7 @@ public final class CanvasModule extends XposedModule {
         trace("Spotify Canvas hook installed");
     }
     private void publish(String track, String url) {
+        if (suspended) return;
         candidates.put(track, url);
         while (candidates.size() > 64) candidates.remove(candidates.keySet().iterator().next());
         if (!track.equals(playingTrack) && !track.equals(previousTrack)) return;

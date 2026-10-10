@@ -2,6 +2,14 @@ package com.os4.canvas;
 import org.junit.Test;
 import static org.junit.Assert.*;
 public class CanvasPolicyTest {
+    @org.junit.Test public void hostBlockSuspendsAndRestoresTheExistingChoice() {
+        org.junit.Assert.assertTrue(CanvasPolicy.enabled(true, false));
+        org.junit.Assert.assertFalse(CanvasPolicy.enabled(true, true));
+        org.junit.Assert.assertTrue(CanvasPolicy.enabled(true, false));
+        org.junit.Assert.assertFalse(CanvasPolicy.enabled(false, false));
+        org.junit.Assert.assertFalse(CanvasPolicy.enabled(false, true));
+    }
+
     @Test public void seekingAndBufferingKeepTheActiveSession() {
         for (int state : new int[]{2, 3, 4, 5, 6, 8})
             assertTrue(CanvasPolicy.acceptPlaybackState(state, false));
