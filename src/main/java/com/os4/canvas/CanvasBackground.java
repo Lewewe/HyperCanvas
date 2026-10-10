@@ -177,7 +177,11 @@ final class CanvasBackground {
         layer = new FrameLayout(parent.getContext()); layer.setTag("HMCSpotifyCanvas");
         layer.setClickable(false); layer.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
         layer.setAlpha(0f);
-        texture = new TextureView(parent.getContext()); texture.setOpaque(false);
+        texture = new TextureView(parent.getContext());
+        // Spotify Canvas MP4s have no alpha.  Keeping this surface opaque avoids the
+        // translucent TextureView composition path, which can repeatedly replay the
+        // decoder's opening frames when SystemUI is rendered with Vulkan.
+        texture.setOpaque(true);
         dim = new View(parent.getContext()); dim.setBackgroundColor(Color.BLACK);
         layer.addView(texture, new FrameLayout.LayoutParams(-1, -1));
         layer.addView(dim, new FrameLayout.LayoutParams(-1, -1));
