@@ -53,22 +53,28 @@ public final class CanvasModule extends XposedModule {
         if (context != null) return;
         context = app;
         trace("Application attached in " + pkg);
+        long setupGeneration = 0L;
         try {
             Bundle config = context.getContentResolver().call(CanvasProvider.URI, "query", null, null);
+            setupGeneration = config == null ? 0L : config.getLong("setupGeneration");
             suspended = config != null && config.getBoolean("hostBlocked");
         } catch (RuntimeException ignored) { }
-        if (suspended) {
-            trace("Suspended by host background policy");
-            return;
-        }
         requestBridge();
+        final long activationGeneration = setupGeneration;
         worker.schedule(() -> {
             try {
-                Bundle response = context.getContentResolver().call(CanvasProvider.URI, "heartbeat", null, null);
+                Bundle data = new Bundle();
+                data.putLong("setupGeneration", activationGeneration);
+                data.putLong("loadedVersion", BuildConfig.VERSION_CODE);
+                Bundle response = context.getContentResolver().call(CanvasProvider.URI, "heartbeat", null, data);
                 trace("Heartbeat: " + (response == null ? "null" : "received"));
             }
             catch (Throwable t) { trace("Bridge is unavailable: " + t); }
         }, 500, TimeUnit.MILLISECONDS);
+        if (suspended) {
+            trace("Suspended by host background policy");
+            return;
+        }
         if (pkg.equals("com.android.systemui")) new Handler(Looper.getMainLooper()).post(() -> CanvasBackground.start(context));
     }
     private void requestBridge() {

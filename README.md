@@ -20,8 +20,8 @@ Spotify Canvas backgrounds for the HyperOS 4 lock screen, built as a separate LS
 
 1. Use a rooted HyperOS 4 device with LSPosed supporting the modern Xposed API. The APK requires Android 15 or newer.
 2. Install both HyperCanvas and a compatible HyperMusicCover-Enhanced build.
-3. Enable HyperCanvas in LSPosed for **Spotify (`com.spotify.music`)** and **SystemUI (`com.android.systemui`)**. Approve scope requests if prompted.
-4. Restart the affected processes or reboot, then enable HyperCanvas in **HyperMusicCover-Enhanced → Extensions**.
+3. In the refreshed HMC-Enhanced 1.0.0 APK, tap **Request hook permissions** below HyperCanvas. Enable the module in LSPosed for **Spotify (`com.spotify.music`)** and **SystemUI (`com.android.systemui`)**, and approve scope requests if prompted.
+4. Tap **Restart hooks to finish setup**. The host waits for a fresh confirmation from SystemUI before unlocking settings. Spotify stays closed and loads its hook when you next open it. Then open HyperCanvas settings and enable Canvas. This setup flow requires HyperCanvas 0.1.1-beta or newer.
 5. Open a track with Canvas in Spotify’s Now Playing screen so Spotify exposes its Canvas data, then lock the screen.
 
 Settings are managed inside HyperMusicCover-Enhanced; HyperCanvas has no separate settings screen. Enabling **Use wallpaper background** in the host temporarily suspends HyperCanvas and disables its switch. Turning that mode off restores your previous HyperCanvas choice; changing the mode restarts Spotify and SystemUI when the extension is installed. Spotify must provide a Canvas for the track. The extension does not generate missing videos or guarantee that an unseen track’s Canvas can be fetched in advance.

@@ -8,9 +8,10 @@ android {
         applicationId = "com.yzc26623.HyperCanvas"
         minSdk = 35
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0-beta"
+        versionCode = 2
+        versionName = "0.1.1-beta"
     }
+    buildFeatures { buildConfig = true }
     signingConfigs {
         if (signing.getProperty("storeFile") != null) create("release") {
             storeFile = rootProject.file(signing.getProperty("storeFile"))

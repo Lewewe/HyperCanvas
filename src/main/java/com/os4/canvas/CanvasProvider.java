@@ -21,6 +21,12 @@ public final class CanvasProvider extends ContentProvider {
             if (prefs.getInt("dim", 20) == 20) editor.putInt("dim", 35);
             editor.apply();
         }
+        // An APK update must not reuse activation flags from an older loaded module.
+        if (prefs.getInt("setupInstalledVersion", 0) != BuildConfig.VERSION_CODE) {
+            prefs.edit().putInt("setupInstalledVersion", BuildConfig.VERSION_CODE)
+                .putInt("setupVersion", 0).putLong("setupGeneration", 0L).putLong("setupStartedAt", 0L)
+                .putBoolean("setupSpotify", false).putBoolean("setupSystem", false).commit();
+        }
         grantBridgeVisibility(getContext());
         return true;
     }
@@ -47,7 +53,17 @@ public final class CanvasProvider extends ContentProvider {
         boolean host = host(), spotify = caller("com.spotify.music"), system = caller("com.android.systemui");
         if (!own && !host && !spotify && !system) throw new SecurityException("Untrusted Canvas bridge caller");
         Bundle out = new Bundle();
-        if ("block".equals(method)) {
+        if ("requestScopes".equals(method)) {
+            if (!host && !own) throw new SecurityException("Only the host can request scope approval");
+            ScopeRequester.request();
+        } else if ("prepareRestart".equals(method)) {
+            if (!host && !own) throw new SecurityException("Only the host can prepare activation");
+            if (ScopeRequester.granted()) {
+                prefs.edit().putLong("setupGeneration", prefs.getLong("setupGeneration", 0L) + 1L)
+                    .putLong("setupStartedAt", System.currentTimeMillis()).putInt("setupVersion", 0)
+                    .putBoolean("setupSpotify", false).putBoolean("setupSystem", false).commit();
+            }
+        } else if ("block".equals(method)) {
             if (!host && !own) throw new SecurityException("Only the host can block Canvas");
             if (data != null) {
                 prefs.edit().putBoolean("hostBlocked", data.getBoolean("hostBlocked")).commit();
@@ -111,7 +127,17 @@ public final class CanvasProvider extends ContentProvider {
             }
         } else if ("heartbeat".equals(method)) {
             if (!spotify && !system) throw new SecurityException("Only hooked processes can report status");
-            prefs.edit().putLong(spotify ? "spotifySeen" : "systemSeen", System.currentTimeMillis()).apply();
+            SharedPreferences.Editor editor = prefs.edit()
+                    .putLong(spotify ? "spotifySeen" : "systemSeen", System.currentTimeMillis());
+            if (data != null && CanvasSetupPolicy.accepts(prefs.getLong("setupGeneration", 0L),
+                    data.getLong("setupGeneration", -1L), data.getLong("loadedVersion", -1L), BuildConfig.VERSION_CODE)) {
+                editor.putBoolean(spotify ? "setupSpotify" : "setupSystem", true);
+                // Spotify loads its hook next time the user opens it; only SystemUI must be live.
+                if (system) {
+                    editor.putInt("setupVersion", BuildConfig.VERSION_CODE).putLong("setupStartedAt", 0L);
+                }
+            }
+            editor.commit();
         } else if (!"query".equals(method)) throw new IllegalArgumentException("Unknown Canvas operation");
         out.putBoolean("installed", true);
         out.putBoolean("hostBlocked", prefs.getBoolean("hostBlocked", false));
@@ -122,7 +148,23 @@ public final class CanvasProvider extends ContentProvider {
         out.putInt("dim", prefs.getInt("dim", 35));
         out.putInt("blur", prefs.getInt("blur", 18));
         out.putInt("coverDim", prefs.getInt("coverDim", 45));
-        out.putString("scopeState", ScopeRequester.state());
+        out.putLong("setupGeneration", prefs.getLong("setupGeneration", 0L));
+        // Only the settings app needs live LSPosed queries, not the video rendering path.
+        if (host || own) {
+            boolean scopesGranted = ScopeRequester.granted();
+            if (ScopeRequester.connected() && !scopesGranted && prefs.getInt("setupVersion", 0) != 0) {
+                prefs.edit().putInt("setupVersion", 0).putLong("setupGeneration", 0L)
+                    .putBoolean("setupSpotify", false).putBoolean("setupSystem", false).commit();
+            }
+            boolean systemLoaded = ScopeRequester.systemLoaded();
+            out.putBoolean("systemLoaded", systemLoaded);
+            out.putInt("setupProtocol", 1);
+            out.putBoolean("frameworkConnected", ScopeRequester.connected());
+            out.putBoolean("scopesGranted", scopesGranted);
+            out.putBoolean("setupReady", scopesGranted && systemLoaded && prefs.getInt("setupVersion", 0) == BuildConfig.VERSION_CODE);
+            out.putLong("setupStartedAt", prefs.getLong("setupStartedAt", 0L));
+            out.putString("scopeState", ScopeRequester.state());
+        }
         out.putLong("spotifySeen", prefs.getLong("spotifySeen", 0));
         out.putLong("systemSeen", prefs.getLong("systemSeen", 0));
         out.putString("lastTrack", prefs.getString("lastTrack", ""));
