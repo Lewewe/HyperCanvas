@@ -21,6 +21,11 @@ final class CanvasBackground {
     private static WeakReference<View> clock = new WeakReference<>(null);
     private static FrameLayout layer;
     private static TextureView texture;
+    private static CanvasGlVideoView glVideo;
+    private static int renderer;
+    private static boolean glesFailed, surfaceOwned, thawPending;
+    private static long freezeGeneration;
+    private static View videoView() { return glVideo != null ? glVideo : texture; }
     private static android.widget.ImageView frozenImage;
     private static FrameLayout frozenLayer;
     private static View frozenDim;
@@ -87,7 +92,8 @@ final class CanvasBackground {
                     boolean temporary = enabled;
                     main.post(() -> {
                         backdropAllowed = false; artworkFallback = false;
-                        if (enabled && !interactive && locked && firstFrame && !large && presentationVisible) {
+                        // Big artwork and lyrics keep the same frozen Canvas backdrop in AOD.
+                        if (enabled && !interactive && locked && firstFrame && presentationVisible) {
                             freezeForAod();
                             host(true, true);
                         } else { clear(); host(false, temporary); }
@@ -140,6 +146,10 @@ final class CanvasBackground {
                     boolean temporary = selected == null;
                     if (!url.equals(CanvasProvider.URI + "/video/" + (track.isEmpty() ? "" : track.substring(14)))) main.post(() -> { backdropAllowed = true; artworkFallback = !temporary && !track.isEmpty(); clear(); host(false, temporary); });
                     else main.post(() -> {
+                        int selectedRenderer = config.getInt("renderer", 0) == 1 ? 1 : 0;
+                        if (renderer != selectedRenderer) {
+                            clear(); renderer = selectedRenderer; glesFailed = false;
+                        }
                         restoreFromAod();
                         backdropAllowed = true;
                         artworkFallback = false;
@@ -177,23 +187,67 @@ final class CanvasBackground {
         layer = new FrameLayout(parent.getContext()); layer.setTag("HMCSpotifyCanvas");
         layer.setClickable(false); layer.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
         layer.setAlpha(0f);
-        texture = new TextureView(parent.getContext());
-        // Spotify Canvas MP4s have no alpha.  Keeping this surface opaque avoids the
-        // translucent TextureView composition path, which can repeatedly replay the
-        // decoder's opening frames when SystemUI is rendered with Vulkan.
-        texture.setOpaque(true);
+        if (renderer == 1 && !glesFailed) {
+            glVideo = new CanvasGlVideoView(parent.getContext(), new CanvasGlVideoView.Callback() {
+                @Override public void ready(CanvasGlVideoView view) {
+                    if (glVideo == view) playIfReady();
+                }
+                @Override public void presented(CanvasGlVideoView view) {
+                    if (glVideo != view || layer == null) return;
+                    if (!firstFrame) {
+                        firstFrame = true; host(true, false); effects();
+                        layer.animate().alpha(1f).setDuration(200L).start();
+                    }
+                    finishThaw();
+                }
+                @Override public void failed(CanvasGlVideoView view, String reason) {
+                    if (glVideo == view) fallbackToTexture(reason);
+                }
+            });
+        } else {
+            texture = new TextureView(parent.getContext());
+            // Keep puhboo's opaque fix for the compatible renderer.
+            texture.setOpaque(true);
+            final TextureView created = texture;
+            texture.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
+                @Override public void onSurfaceTextureAvailable(SurfaceTexture t, int w, int h) {
+                    if (texture == created) playIfReady();
+                }
+                @Override public void onSurfaceTextureSizeChanged(SurfaceTexture t, int w, int h) {
+                    if (texture == created) transform();
+                }
+                @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture t) {
+                    if (texture == created) release();
+                    return true;
+                }
+                @Override public void onSurfaceTextureUpdated(SurfaceTexture t) {
+                    if (texture == created) finishThaw();
+                }
+            });
+        }
         dim = new View(parent.getContext()); dim.setBackgroundColor(Color.BLACK);
-        layer.addView(texture, new FrameLayout.LayoutParams(-1, -1));
+        layer.addView(videoView(), new FrameLayout.LayoutParams(-1, -1));
         layer.addView(dim, new FrameLayout.LayoutParams(-1, -1));
-        // Draw above the wallpaper inside its background layer, still below the clock and cards.
         parent.addView(layer, new ViewGroup.LayoutParams(-1, -1));
         orderLayer();
-        texture.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
-            @Override public void onSurfaceTextureAvailable(SurfaceTexture t, int w, int h) { playIfReady(); }
-            @Override public void onSurfaceTextureSizeChanged(SurfaceTexture t, int w, int h) { transform(); }
-            @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture t) { release(); return true; }
-            @Override public void onSurfaceTextureUpdated(SurfaceTexture t) { }
-        });
+        final CanvasGlVideoView pending = glVideo;
+        if (pending != null) main.postDelayed(() -> {
+            if (glVideo == pending && !firstFrame) fallbackToTexture("No GLES frame after 8 seconds");
+        }, 8000L);
+        android.util.Log.i("MCCanvas", "Renderer: " + (glVideo == null ? "TextureView" : "OpenGL ES"));
+    }
+    private static void fallbackToTexture(String reason) {
+        if (glVideo == null) return;
+        android.util.Log.w("MCCanvas", "GLES fallback: " + reason);
+        String url = desired, track = currentTrack;
+        glesFailed = true;
+        clear();
+        if (!context.getSystemService(PowerManager.class).isInteractive()) {
+            host(false, true);
+            return;
+        }
+        currentTrack = track; desired = url;
+        ensureLayer(); playIfReady();
     }
     private static void orderLayer() {
         if (layer == null || !(layer.getParent() instanceof ViewGroup)) return;
@@ -214,15 +268,19 @@ final class CanvasBackground {
         if (artwork != null) artwork.bringToFront();
     }
     private static void playIfReady() {
-        if (texture == null || !texture.isAvailable() || desired.isEmpty()
+        if (videoView() == null || (glVideo != null ? glVideo.videoSurface() == null
+                : !texture.isAvailable()) || desired.isEmpty()
                 || (desired.equals(failedUrl) && SystemClock.uptimeMillis() < retryAt)) return;
         long token = ++generation;
         String url = desired;
-        Surface next = new Surface(texture.getSurfaceTexture());
+        final CanvasGlVideoView requestedGl = glVideo;
+        boolean owned = requestedGl == null;
+        Surface next = owned ? new Surface(texture.getSurfaceTexture()) : requestedGl.videoSurface();
         worker.post(() -> {
+            if (token != generation) { if (owned) next.release(); return; }
             dispose();
-            if (token != generation) { next.release(); return; }
-            surface = next;
+            if (requestedGl != null) requestedGl.releaseRetiredSurfaces();
+            surface = next; surfaceOwned = owned;
             try {
                 MediaPlayer created = new MediaPlayer(); player = created;
                 created.setSurface(next); created.setVolume(0f, 0f); created.setLooping(true);
@@ -230,21 +288,30 @@ final class CanvasBackground {
                 created.setOnVideoSizeChangedListener((p, w, h) -> main.post(() -> { if (token == generation) { videoW = w; videoH = h; transform(); } }));
                 created.setOnInfoListener((p, what, extra) -> {
                     if (what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) {
-                        if (token == generation && !wantedPlaying) p.pause();
+                        if (token == generation && (!wantedPlaying || !presentationVisible || bouncerVisible || frozenInAod)) p.pause();
                         main.post(() -> {
                         if (token != generation || layer == null) return;
-                        firstFrame = true; host(true, false); effects();
-                        layer.animate().alpha(1f).setDuration(200L).start();
+                        if (requestedGl == null) {
+                            firstFrame = true; host(true, false); effects();
+                            layer.animate().alpha(1f).setDuration(200L).start();
+                        }
                     });
                     }
                     return false;
                 });
-                created.setOnErrorListener((p, what, extra) -> { main.post(() -> { if (token == generation) { failedUrl = url; retryAt = SystemClock.uptimeMillis() + 30000L; clear(); host(false, false); } }); return true; });
+                created.setOnErrorListener((p, what, extra) -> { main.post(() -> { if (token == generation) {
+                    if (requestedGl != null && glVideo == requestedGl) fallbackToTexture("Decoder failure");
+                    else { failedUrl = url; retryAt = SystemClock.uptimeMillis() + 30000L; clear(); host(false, false); }
+                } }); return true; });
                 created.setDataSource(context, android.net.Uri.parse(url)); created.prepareAsync();
-            } catch (Throwable t) { android.util.Log.w("MCCanvas", "Canvas video could not be prepared", t); dispose(); main.post(() -> { if (token == generation) { failedUrl = url; retryAt = SystemClock.uptimeMillis() + 30000L; clear(); host(false, false); } }); }
+            } catch (Throwable t) { android.util.Log.w("MCCanvas", "Canvas video could not be prepared", t); dispose(); main.post(() -> { if (token == generation) {
+                    if (requestedGl != null && glVideo == requestedGl) fallbackToTexture("Decoder failure");
+                    else { failedUrl = url; retryAt = SystemClock.uptimeMillis() + 30000L; clear(); host(false, false); }
+                } }); }
         });
     }
     private static void transform() {
+        if (glVideo != null) { glVideo.setVideoSize(videoW, videoH); return; }
         if (texture == null || videoW <= 0 || videoH <= 0 || texture.getWidth() <= 0 || texture.getHeight() <= 0) return;
         float w = texture.getWidth(), h = texture.getHeight();
         float scale = Math.max(w / videoW, h / videoH);
@@ -252,7 +319,7 @@ final class CanvasBackground {
         texture.setTransform(matrix);
     }
     private static void effects() {
-        if (texture == null || dim == null) return;
+        if (videoView() == null || dim == null) return;
         float nextDim = ((large || bouncerVisible || frozenInAod) ? Math.max(normalDim, coverDim) : normalDim) / 100f;
         float nextBlur = (large || bouncerVisible || frozenInAod) ? Math.max(bouncerVisible || frozenInAod ? 18 : 0, blur) * context.getResources().getDisplayMetrics().density : 0f;
         if (Float.isNaN(targetDim)) {
@@ -276,11 +343,12 @@ final class CanvasBackground {
         effectAnimator.start();
     }
     private static void drawEffects() {
-        if (texture == null || dim == null) return;
+        if (videoView() == null || dim == null) return;
         dim.setAlpha(shownDim);
         RenderEffect effect = shownBlur < 0.5f ? null
                 : RenderEffect.createBlurEffect(shownBlur, shownBlur, Shader.TileMode.CLAMP);
-        texture.setRenderEffect(effect);
+        if (glVideo != null) glVideo.setBlur(shownBlur);
+        else texture.setRenderEffect(effect);
         if (frozenImage != null) frozenImage.setRenderEffect(effect);
         if (frozenDim != null) frozenDim.setAlpha(shownDim);
     }
@@ -302,7 +370,8 @@ final class CanvasBackground {
                 large = result != null && result.getBoolean("canvasLarge");
                 bouncerVisible = result != null && result.getBoolean("canvasBouncer");
                 presentationVisible = result == null || result.getBoolean("canvasVisible", true);
-                if (layer != null) layer.setVisibility(presentationVisible && !frozenInAod ? View.VISIBLE : View.INVISIBLE);
+                if (layer != null) layer.setVisibility(presentationVisible
+                        && (!frozenInAod || frozenLayer == null) ? View.VISIBLE : View.INVISIBLE);
                 if (frozenLayer != null) frozenLayer.setVisibility(presentationVisible ? View.VISIBLE : View.INVISIBLE);
                 worker.post(() -> {
                     try {
@@ -317,75 +386,115 @@ final class CanvasBackground {
         main.postDelayed(() -> querying = false, 1500L);
     }
     private static void freezeForAod() {
-        if (frozenInAod || texture == null || layer == null) return;
+        if (frozenInAod || videoView() == null || layer == null) return;
         frozenInAod = true;
-        // Capture only once; AOD displays this small static copy without decoding video frames.
-        if (texture.isAvailable() && texture.getWidth() > 0 && texture.getHeight() > 0) {
-            int width = Math.min(512, texture.getWidth());
-            int height = Math.max(1, Math.round(width * texture.getHeight() / (float) texture.getWidth()));
-            try { frozenBitmap = texture.getBitmap(width, height); }
-            catch (IllegalStateException ignored) { frozenBitmap = null; }
-            if (frozenBitmap != null) {
-                frozenImage = new android.widget.ImageView(layer.getContext());
-                frozenImage.setScaleType(android.widget.ImageView.ScaleType.FIT_XY);
-                frozenImage.setImageBitmap(frozenBitmap);
-                View root = layer.getRootView();
-                if (root instanceof ViewGroup && root != layer.getParent()) {
-                    // The keyguard content shrinks in AOD. Its static background must not inherit that scale.
-                    frozenLayer = new FrameLayout(layer.getContext());
-                    frozenLayer.setTag("HMCSpotifyCanvasAod");
-                    frozenLayer.setClickable(false);
-                    frozenLayer.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
-                    frozenDim = new View(layer.getContext());
-                    frozenDim.setBackgroundColor(Color.BLACK);
-                    frozenLayer.addView(frozenImage, new FrameLayout.LayoutParams(-1, -1));
-                    frozenLayer.addView(frozenDim, new FrameLayout.LayoutParams(-1, -1));
-                    ((ViewGroup) root).addView(frozenLayer, 0, new ViewGroup.LayoutParams(-1, -1));
-                    layer.setVisibility(View.INVISIBLE);
-                } else {
-                    layer.addView(frozenImage, 1, new FrameLayout.LayoutParams(-1, -1));
-                    texture.setVisibility(View.INVISIBLE);
-                }
-            }
-        }
+        thawPending = false;
+        long capture = ++freezeGeneration;
         worker.post(() -> {
             try { if (player != null && player.isPlaying()) player.pause(); }
             catch (IllegalStateException ignored) { }
         });
-        // No effect animator in AOD: apply the frosted still frame once.
         if (effectAnimator != null) { effectAnimator.cancel(); effectAnimator = null; }
         targetBlur = shownBlur = Math.max(18, blur) * context.getResources().getDisplayMetrics().density;
         targetDim = shownDim = Math.max(normalDim, coverDim) / 100f;
+        drawEffects();
+        if (glVideo != null) {
+            glVideo.snapshot(bitmap -> installFrozenFrame(bitmap, capture));
+        } else {
+            Bitmap bitmap = null;
+            if (texture.isAvailable() && texture.getWidth() > 0 && texture.getHeight() > 0) {
+                int width = Math.min(512, texture.getWidth());
+                int height = Math.max(1, Math.round(width * texture.getHeight() / (float) texture.getWidth()));
+                try { bitmap = texture.getBitmap(width, height); }
+                catch (IllegalStateException ignored) { }
+            }
+            installFrozenFrame(bitmap, capture);
+        }
+    }
+    private static void installFrozenFrame(Bitmap bitmap, long capture) {
+        if (!frozenInAod || capture != freezeGeneration || layer == null) {
+            if (bitmap != null) bitmap.recycle();
+            return;
+        }
+        if (bitmap == null) return; // Retain the paused surface if a capture is unavailable.
+        dropFrozenFrame();
+        frozenBitmap = bitmap;
+        frozenImage = new android.widget.ImageView(layer.getContext());
+        frozenImage.setScaleType(android.widget.ImageView.ScaleType.FIT_XY);
+        frozenImage.setImageBitmap(bitmap);
+        View root = layer.getRootView();
+        if (root instanceof ViewGroup && root != layer.getParent()) {
+            // The snapshot stays outside the keyguard's AOD scale and clipping.
+            frozenLayer = new FrameLayout(layer.getContext());
+            frozenLayer.setTag("HMCSpotifyCanvasAod");
+            frozenLayer.setClickable(false);
+            frozenLayer.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+            frozenDim = new View(layer.getContext()); frozenDim.setBackgroundColor(Color.BLACK);
+            frozenLayer.addView(frozenImage, new FrameLayout.LayoutParams(-1, -1));
+            frozenLayer.addView(frozenDim, new FrameLayout.LayoutParams(-1, -1));
+            ((ViewGroup) root).addView(frozenLayer, 0, new ViewGroup.LayoutParams(-1, -1));
+            frozenLayer.setVisibility(presentationVisible ? View.VISIBLE : View.INVISIBLE);
+            layer.setVisibility(View.INVISIBLE);
+        } else {
+            layer.addView(frozenImage, 1, new FrameLayout.LayoutParams(-1, -1));
+            videoView().setVisibility(View.INVISIBLE);
+        }
         drawEffects();
     }
     private static void restoreFromAod() {
         if (!frozenInAod) return;
         frozenInAod = false;
+        ++freezeGeneration;
+        thawPending = frozenImage != null;
+        if (videoView() != null) videoView().setVisibility(View.VISIBLE);
+        if (layer != null) layer.setVisibility(presentationVisible ? View.VISIBLE : View.INVISIBLE);
+        if (glVideo != null) glVideo.requestPresentation();
+        else finishThaw(); // TextureView retains its last buffer on the compatible path.
+    }
+    private static void finishThaw() {
+        if (!thawPending || frozenInAod) return;
+        thawPending = false;
+        dropFrozenFrame();
+    }
+    private static void dropFrozenFrame() {
         if (frozenImage != null) {
             frozenImage.setImageDrawable(null);
             if (frozenImage.getParent() instanceof ViewGroup)
                 ((ViewGroup) frozenImage.getParent()).removeView(frozenImage);
-            frozenImage = null;
         }
+        frozenImage = null;
         if (frozenLayer != null && frozenLayer.getParent() instanceof ViewGroup)
             ((ViewGroup) frozenLayer.getParent()).removeView(frozenLayer);
         frozenLayer = null; frozenDim = null;
         if (frozenBitmap != null) { frozenBitmap.recycle(); frozenBitmap = null; }
-        if (texture != null) texture.setVisibility(View.VISIBLE);
-        if (layer != null) layer.setVisibility(presentationVisible ? View.VISIBLE : View.INVISIBLE);
     }
     private static void clear() {
-        restoreFromAod();
+        ++freezeGeneration;
+        frozenInAod = thawPending = false;
+        dropFrozenFrame();
         if (effectAnimator != null) { effectAnimator.cancel(); effectAnimator = null; }
-        targetBlur = targetDim = Float.NaN;
-        shownBlur = shownDim = 0f;
-        release(); firstFrame = false; desired = "";
-        if (layer != null) { layer.animate().cancel(); if (layer.getParent() instanceof android.view.ViewGroup) ((android.view.ViewGroup) layer.getParent()).removeView(layer); }
-        layer = null; texture = null; dim = null; videoW = videoH = 0;
+        targetBlur = targetDim = Float.NaN; shownBlur = shownDim = 0f;
+        final FrameLayout oldLayer = layer;
+        final CanvasGlVideoView oldGl = glVideo;
+        ++generation; firstFrame = false; desired = "";
+        layer = null; texture = null; glVideo = null; dim = null; videoW = videoH = 0;
+        // Stop the decoder before releasing its output surface or detaching the GL view.
+        worker.post(() -> {
+            dispose();
+            main.post(() -> {
+                if (oldGl != null) oldGl.close();
+                if (oldLayer != null) {
+                    oldLayer.animate().cancel();
+                    if (oldLayer.getParent() instanceof ViewGroup)
+                        ((ViewGroup) oldLayer.getParent()).removeView(oldLayer);
+                }
+            });
+        });
     }
     private static void release() { generation++; if (worker != null) worker.post(CanvasBackground::dispose); }
     private static void dispose() {
         if (player != null) { try { player.release(); } catch (Throwable ignored) { } player = null; }
-        if (surface != null) { surface.release(); surface = null; }
+        if (surface != null && surfaceOwned) surface.release();
+        surface = null; surfaceOwned = false;
     }
 }

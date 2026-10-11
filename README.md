@@ -10,10 +10,11 @@ Spotify Canvas backgrounds for the HyperOS 4 lock screen, built as a separate LS
 - Keep normal artwork behavior for tracks without Canvas.
 - Blur and dim Canvas while viewing big cover art or lyrics, with animated transitions.
 - Toggle lyrics from the player while Canvas is active.
-- Pause Canvas with playback and while entering a password. In Canvas mode, AOD uses a frozen, blurred frame instead of playing video.
+- Pause Canvas with playback and while entering a password. AOD uses a frozen, blurred frame, including while big cover art or lyrics are open.
 - Adjust background dimming, extra dimming and blur in HyperMusicCover-Enhanced. Normal dimming defaults to 35%.
 - Choose whether Canvas remains visible in pill mode, and restore the previous player/cover/lyrics state when reopening the player.
 - Keep a bounded cache of up to three Canvas videos and clear it when the extension is disabled.
+- Choose the default TextureView renderer or an experimental OpenGL ES renderer with GPU blur.
 
 ## Requirements and setup
 
@@ -26,6 +27,8 @@ Spotify Canvas backgrounds for the HyperOS 4 lock screen, built as a separate LS
 Settings are managed inside HyperMusicCover-Enhanced; HyperCanvas has no separate settings screen. Enabling **Use wallpaper background** in the host temporarily suspends HyperCanvas and disables its switch. Turning that mode off restores your previous HyperCanvas choice; changing the mode restarts Spotify and SystemUI when the extension is installed. Spotify must provide a Canvas for the track. The extension does not generate missing videos or guarantee that an unseen track’s Canvas can be fetched in advance.
 
 ## How it works
+
+The **Video renderer** setting applies when the Canvas is next displayed, without restarting scopes. OpenGL ES uses a separate video surface, two reduced-resolution blur passes, and a single small snapshot for AOD. If initialization or rendering fails, it falls back to TextureView for the current session. Switch to TextureView and back to retry OpenGL ES. The default remains TextureView; device compatibility and performance of the experimental renderer still need testing.
 
 The Spotify hook reads Canvas metadata and available cached video data. A signature-checked bridge shares the current track and video with the SystemUI hook, which renders a muted, looping background and coordinates with HyperMusicCover-Enhanced. Canvas videos are fetched and cached locally; no microphone capture is used.
 
@@ -52,5 +55,7 @@ git clone --recurse-submodules https://github.com/Lewewe/HyperMusicCover-Enhance
 Experimental. Tested on Xiaomi 17 Pro running HyperOS 4. Spotify internals and HyperOS layouts may differ between versions or devices; behavior on other configurations needs testing.
 
 ## License
+
+The OpenGL ES renderer builds on [puhboo's HyperCanvas work](https://github.com/puhboo/HyperCanvas/commit/4c9fa0a0e7aa1883e41c50aece308be11be0f270).
 
 AGPL-3.0, see [LICENSE](LICENSE).

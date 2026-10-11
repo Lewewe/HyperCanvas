@@ -57,6 +57,7 @@ public final class CanvasProvider extends ContentProvider {
             if (!host && !own) throw new SecurityException("Only the host can configure Canvas");
             if (data != null) prefs.edit().putBoolean("enabled", data.getBoolean("enabled"))
                 .putBoolean("showInPill", data.getBoolean("showInPill"))
+                .putInt("renderer", data.getInt("renderer", prefs.getInt("renderer", 0)) == 1 ? 1 : 0)
                 .putInt("dim", Math.max(0, Math.min(80, data.getInt("dim", 35))))
                 .putInt("blur", Math.max(0, Math.min(40, data.getInt("blur", 18))))
                 .putInt("coverDim", Math.max(0, Math.min(80, data.getInt("coverDim", 45)))).apply();
@@ -117,6 +118,7 @@ public final class CanvasProvider extends ContentProvider {
         out.putBoolean("requestedEnabled", prefs.getBoolean("enabled", false));
         out.putBoolean("enabled", enabled());
         out.putBoolean("showInPill", prefs.getBoolean("showInPill", false));
+        out.putInt("renderer", prefs.getInt("renderer", 0));
         out.putInt("dim", prefs.getInt("dim", 35));
         out.putInt("blur", prefs.getInt("blur", 18));
         out.putInt("coverDim", prefs.getInt("coverDim", 45));
