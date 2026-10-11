@@ -18,8 +18,18 @@ final class CanvasBackground {
     private static final HandlerThread thread = new HandlerThread("MCCanvasPlayback");
     private static Handler worker;
     private static Context context;
+    // Keep the asynchronous cache provider alive while its lock-screen client needs it.
+    private static ContentProviderClient cacheClient;
+    private static void keepCacheClient(boolean keep) {
+        if (keep && cacheClient == null) {
+            cacheClient = context.getContentResolver().acquireContentProviderClient(CanvasProvider.URI);
+        } else if (!keep && cacheClient != null) {
+            cacheClient.close(); cacheClient = null;
+        }
+    }
     private static WeakReference<View> clock = new WeakReference<>(null);
     private static FrameLayout layer;
+    private static View keyguardAbove;
     private static TextureView texture;
     private static CanvasGlVideoView glVideo;
     private static int renderer;
@@ -39,6 +49,8 @@ final class CanvasBackground {
     private static volatile long generation;
     private static volatile boolean firstFrame, wantedPlaying = true, presentationVisible = true, bouncerVisible;
     private static boolean querying;
+    private static long hostRequest;
+    private static String lastRenderState = "";
     private static MediaController watched;
     private static final MediaController.Callback sessionCallback = new MediaController.Callback() {
         @Override public void onMetadataChanged(MediaMetadata metadata) { wake(); }
@@ -87,6 +99,7 @@ final class CanvasBackground {
                 Bundle config = context.getContentResolver().call(CanvasProvider.URI, "query", null, null);
                 boolean enabled = config != null && config.getBoolean("enabled");
                 showInPill = config != null && config.getBoolean("showInPill");
+                keepCacheClient(enabled && interactive && locked);
                 if (!enabled || !interactive || !locked) {
                     watch(null);
                     boolean temporary = enabled;
@@ -161,9 +174,10 @@ final class CanvasBackground {
                         else if (desired.equals(failedUrl) && SystemClock.uptimeMillis() >= retryAt) playIfReady();
                         orderLayer();
                         effects();
+                        recordRenderState();
                     });
                 }
-            } catch (Throwable t) { android.util.Log.w("MCCanvas", "Canvas background unavailable", t); main.post(() -> { artworkFallback = false; clear(); host(false, true); }); }
+            } catch (Throwable t) { keepCacheClient(false); android.util.Log.w("MCCanvas", "Canvas background unavailable", t); main.post(() -> { artworkFallback = false; clear(); host(false, true); }); }
             worker.removeCallbacks(this);
             worker.postDelayed(this, delay);
         }
@@ -184,6 +198,18 @@ final class CanvasBackground {
         View background = id == 0 ? null : root.findViewById(id);
         if (!(background instanceof ViewGroup)) return;
         ViewGroup parent = (ViewGroup) background;
+        keyguardAbove = null;
+        int keyguardId = anchor.getResources().getIdentifier("keyguard_root_view", "id", "com.android.systemui");
+        // Keep both live video and the AOD snapshot outside the OEM scale animation.
+        for (Object current = background; keyguardId != 0 && current instanceof View;
+                current = ((View) current).getParent()) {
+            View view = (View) current;
+            if (view.getId() == keyguardId && view.getParent() instanceof ViewGroup) {
+                parent = (ViewGroup) view.getParent();
+                keyguardAbove = view;
+                break;
+            }
+        }
         layer = new FrameLayout(parent.getContext()); layer.setTag("HMCSpotifyCanvas");
         layer.setClickable(false); layer.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
         layer.setAlpha(0f);
@@ -228,7 +254,8 @@ final class CanvasBackground {
         dim = new View(parent.getContext()); dim.setBackgroundColor(Color.BLACK);
         layer.addView(videoView(), new FrameLayout.LayoutParams(-1, -1));
         layer.addView(dim, new FrameLayout.LayoutParams(-1, -1));
-        parent.addView(layer, new ViewGroup.LayoutParams(-1, -1));
+        parent.addView(layer, keyguardAbove == null ? parent.getChildCount() : parent.indexOfChild(keyguardAbove),
+                new ViewGroup.LayoutParams(-1, -1));
         orderLayer();
         final CanvasGlVideoView pending = glVideo;
         if (pending != null) main.postDelayed(() -> {
@@ -252,6 +279,8 @@ final class CanvasBackground {
     private static void orderLayer() {
         if (layer == null || !(layer.getParent() instanceof ViewGroup)) return;
         ViewGroup parent = (ViewGroup) layer.getParent();
+        // This sibling must stay behind all keyguard controls and big artwork.
+        if (keyguardAbove != null && keyguardAbove.getParent() == parent) return;
         View artwork = null;
         for (int index = 0; index < parent.getChildCount(); index++) {
             View child = parent.getChildAt(index);
@@ -355,12 +384,16 @@ final class CanvasBackground {
     private static void host(boolean ready, boolean temporary) {
         if (querying || context == null) return;
         querying = true;
+        final long request = ++hostRequest, sceneGeneration = generation;
         Intent intent = new Intent("com.os4.musiccover.PROBE").setPackage("com.android.systemui")
             .putExtra("frozenInAod", frozenInAod).putExtra("showInPill", showInPill).putExtra("backdropAllowed", backdropAllowed).putExtra("artworkFallback", artworkFallback).putExtra("op", "canvasframe").putExtra("ready", ready).putExtra("temporary", temporary).putExtra("track", currentTrack);
         BroadcastOptions options = BroadcastOptions.makeBasic(); options.setShareIdentityEnabled(true);
         context.sendOrderedBroadcast(intent, null, options.toBundle(), new BroadcastReceiver() {
             @Override public void onReceive(Context c, Intent i) {
+                if (request != hostRequest) return;
                 querying = false;
+                // A reply for a retired surface must not hide or pause the current Canvas.
+                if (sceneGeneration != generation) { host(firstFrame, false); return; }
                 Bundle result = getResultExtras(false);
                 if (result != null && result.getBoolean("canvasBlocked")) {
                     presentationVisible = false;
@@ -383,7 +416,28 @@ final class CanvasBackground {
                 effects();
             }
         }, main, 0, null, null);
-        main.postDelayed(() -> querying = false, 1500L);
+        main.postDelayed(() -> {
+            if (request == hostRequest && querying) {
+                ++hostRequest;
+                querying = false;
+            }
+        }, 1500L);
+    }
+    private static void recordRenderState() {
+        String state = currentTrack + " renderer=" + renderer + " ready=" + firstFrame
+                + " visible=" + presentationVisible + " large=" + large
+                + " frozen=" + frozenInAod + " playing=" + wantedPlaying
+                + " layer=" + (layer == null ? "none" : layer.getVisibility() + "/" + layer.getAlpha()
+                    + "/shown=" + layer.isShown())
+                + " surface=" + (surface != null && surface.isValid());
+        if (state.equals(lastRenderState)) return;
+        lastRenderState = state;
+        worker.post(() -> {
+            java.io.File file = new java.io.File(context.getCacheDir(), "hypercanvas-render-state.txt");
+            try (java.io.FileWriter out = new java.io.FileWriter(file, file.length() < 16384)) {
+                out.write(System.currentTimeMillis() + " " + state + "\n");
+            } catch (java.io.IOException ignored) { }
+        });
     }
     private static void freezeForAod() {
         if (frozenInAod || videoView() == null || layer == null) return;
@@ -403,8 +457,13 @@ final class CanvasBackground {
         } else {
             Bitmap bitmap = null;
             if (texture.isAvailable() && texture.getWidth() > 0 && texture.getHeight() > 0) {
-                int width = Math.min(512, texture.getWidth());
-                int height = Math.max(1, Math.round(width * texture.getHeight() / (float) texture.getWidth()));
+                // getBitmap omits TextureView's display transform. Preserve the decoder aspect
+                // here and let CENTER_CROP reproduce the live video's crop on the frozen layer.
+                int sourceWidth = videoW > 0 ? videoW : texture.getWidth();
+                int sourceHeight = videoH > 0 ? videoH : texture.getHeight();
+                float scale = Math.min(1f, 1024f / Math.max(sourceWidth, sourceHeight));
+                int width = Math.max(1, Math.round(sourceWidth * scale));
+                int height = Math.max(1, Math.round(sourceHeight * scale));
                 try { bitmap = texture.getBitmap(width, height); }
                 catch (IllegalStateException ignored) { }
             }
@@ -420,10 +479,10 @@ final class CanvasBackground {
         dropFrozenFrame();
         frozenBitmap = bitmap;
         frozenImage = new android.widget.ImageView(layer.getContext());
-        frozenImage.setScaleType(android.widget.ImageView.ScaleType.FIT_XY);
+        frozenImage.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP);
         frozenImage.setImageBitmap(bitmap);
-        View root = layer.getRootView();
-        if (root instanceof ViewGroup && root != layer.getParent()) {
+        View root = keyguardAbove != null ? (View) layer.getParent() : layer.getRootView();
+        if (root instanceof ViewGroup && (keyguardAbove != null || root != layer.getParent())) {
             // The snapshot stays outside the keyguard's AOD scale and clipping.
             frozenLayer = new FrameLayout(layer.getContext());
             frozenLayer.setTag("HMCSpotifyCanvasAod");
@@ -432,7 +491,9 @@ final class CanvasBackground {
             frozenDim = new View(layer.getContext()); frozenDim.setBackgroundColor(Color.BLACK);
             frozenLayer.addView(frozenImage, new FrameLayout.LayoutParams(-1, -1));
             frozenLayer.addView(frozenDim, new FrameLayout.LayoutParams(-1, -1));
-            ((ViewGroup) root).addView(frozenLayer, 0, new ViewGroup.LayoutParams(-1, -1));
+            ViewGroup parent = (ViewGroup) root;
+            int index = keyguardAbove != null ? parent.indexOfChild(keyguardAbove) : 0;
+            parent.addView(frozenLayer, index, new ViewGroup.LayoutParams(-1, -1));
             frozenLayer.setVisibility(presentationVisible ? View.VISIBLE : View.INVISIBLE);
             layer.setVisibility(View.INVISIBLE);
         } else {
@@ -477,7 +538,7 @@ final class CanvasBackground {
         final FrameLayout oldLayer = layer;
         final CanvasGlVideoView oldGl = glVideo;
         ++generation; firstFrame = false; desired = "";
-        layer = null; texture = null; glVideo = null; dim = null; videoW = videoH = 0;
+        layer = null; keyguardAbove = null; texture = null; glVideo = null; dim = null; videoW = videoH = 0;
         // Stop the decoder before releasing its output surface or detaching the GL view.
         worker.post(() -> {
             dispose();

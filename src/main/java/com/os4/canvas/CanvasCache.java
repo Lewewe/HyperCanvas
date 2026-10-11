@@ -11,6 +11,7 @@ final class CanvasCache {
     private static final long MAX_VIDEO = 16L * 1024 * 1024, MAX_TOTAL = 48L * 1024 * 1024;
     // At most three cached tracks can download; a slow neighbor cannot block the live track.
     private static final ExecutorService worker = Executors.newFixedThreadPool(3);
+    private static final ScheduledExecutorService deadlines = Executors.newSingleThreadScheduledExecutor();
     private static final Set<String> pending = new HashSet<>();
     private static volatile long generation;
     private static volatile Set<String> window = java.util.Collections.emptySet();
@@ -44,14 +45,27 @@ final class CanvasCache {
     private static void download(Context context, String track, String url, File target, long token) {
         long started = android.os.SystemClock.elapsedRealtime();
         HttpURLConnection connection = null;
+        java.util.concurrent.atomic.AtomicReference<HttpURLConnection> active = new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.atomic.AtomicBoolean expired = new java.util.concurrent.atomic.AtomicBoolean();
+        // Bound the entire attempt, including redirects and a server that dribbles bytes.
+        ScheduledFuture<?> deadline = deadlines.schedule(() -> {
+            expired.set(true);
+            HttpURLConnection running = active.get();
+            if (running != null) running.disconnect();
+        }, 6, TimeUnit.SECONDS);
         File temporary = new File(target.getParentFile(), target.getName() + "." + token + ".part");
         try {
             if (token != generation || !allowed(track)) return;
             target.getParentFile().mkdirs();
             for (int redirects = 0; redirects <= 4; redirects++) {
+                if (expired.get()) throw new IOException("Canvas deadline exceeded");
                 if (!CanvasPolicy.video(url)) throw new IOException("Unsupported Canvas host");
                 connection = (HttpURLConnection) new URL(url).openConnection();
-                connection.setConnectTimeout(8000); connection.setReadTimeout(8000);
+                active.set(connection);
+                if (expired.get()) throw new IOException("Canvas deadline exceeded");
+                connection.setConnectTimeout(3000); connection.setReadTimeout(3000);
+                // A fresh request must not inherit a pooled socket suspended on screen-off.
+                connection.setRequestProperty("Connection", "close");
                 connection.setInstanceFollowRedirects(false);
                 int status = connection.getResponseCode();
                 if (status >= 300 && status < 400) {
@@ -66,7 +80,7 @@ final class CanvasCache {
                 try (InputStream input = connection.getInputStream(); OutputStream output = new FileOutputStream(temporary)) {
                     byte[] buffer = new byte[32768]; int count;
                     while ((count = input.read(buffer)) != -1) {
-                        if (token != generation || !allowed(track) || (size += count) > MAX_VIDEO) throw new IOException("Canvas download canceled");
+                        if (expired.get() || token != generation || !allowed(track) || (size += count) > MAX_VIDEO) throw new IOException("Canvas download canceled");
                         output.write(buffer, 0, count);
                     }
                 }
@@ -92,6 +106,8 @@ final class CanvasCache {
             diagnostic(context, track + " download failed after " + (android.os.SystemClock.elapsedRealtime() - started) + "ms: " + error.getClass().getSimpleName());
             // A failed download leaves the existing lock-screen cover unchanged.
         } finally {
+            deadline.cancel(false);
+            active.set(null);
             if (connection != null) connection.disconnect();
             temporary.delete();
             synchronized (CanvasCache.class) { if (token == generation) pending.remove(track); }
