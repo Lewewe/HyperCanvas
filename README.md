@@ -1,3 +1,5 @@
+<p align="center"><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
+
 # HyperCanvas
 
 Spotify Canvas backgrounds for the HyperOS 4 lock screen, built as a separate LSPosed extension.
