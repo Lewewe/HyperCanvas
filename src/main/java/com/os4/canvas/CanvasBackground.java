@@ -171,6 +171,8 @@ final class CanvasBackground {
                             clear(); currentTrack = track; desired = url; ensureLayer(); playIfReady();
                         } else if (layer == null || !layer.isAttachedToWindow()) { clear(); currentTrack = track; desired = url; ensureLayer(); playIfReady(); }
                         if (firstFrame) host(true, false);
+                        // Hidden and frameless, it would never ask again: ask only whether to show.
+                        else if (layer != null && layer.getVisibility() != View.VISIBLE) host(false, false, true);
                         else if (desired.equals(failedUrl) && SystemClock.uptimeMillis() >= retryAt) playIfReady();
                         orderLayer();
                         effects();
@@ -213,6 +215,9 @@ final class CanvasBackground {
         layer = new FrameLayout(parent.getContext()); layer.setTag("HMCSpotifyCanvas");
         layer.setClickable(false); layer.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
         layer.setAlpha(0f);
+        // Hidden until the host says to show it: a visible video surface cuts a hole through
+        // SystemUI's window even at alpha 0, and the wake showed black behind the depth subject.
+        layer.setVisibility(presentationVisible ? View.VISIBLE : View.INVISIBLE);
         if (renderer == 1 && !glesFailed) {
             glVideo = new CanvasGlVideoView(parent.getContext(), new CanvasGlVideoView.Callback() {
                 @Override public void ready(CanvasGlVideoView view) {
@@ -222,7 +227,6 @@ final class CanvasBackground {
                     if (glVideo != view || layer == null) return;
                     if (!firstFrame) {
                         firstFrame = true; host(true, false); effects();
-                        layer.animate().alpha(1f).setDuration(200L).start();
                     }
                     finishThaw();
                 }
@@ -230,6 +234,9 @@ final class CanvasBackground {
                     if (glVideo == view) fallbackToTexture(reason);
                 }
             });
+            // Its own surface ignores the layer's alpha: before the first frame it showed as
+            // black over the wallpaper, for seconds while the song is paused.
+            glVideo.setAlpha(0f);
         } else {
             texture = new TextureView(parent.getContext());
             // Keep puhboo's opaque fix for the compatible renderer.
@@ -322,7 +329,6 @@ final class CanvasBackground {
                         if (token != generation || layer == null) return;
                         if (requestedGl == null) {
                             firstFrame = true; host(true, false); effects();
-                            layer.animate().alpha(1f).setDuration(200L).start();
                         }
                     });
                     }
@@ -381,19 +387,22 @@ final class CanvasBackground {
         if (frozenImage != null) frozenImage.setRenderEffect(effect);
         if (frozenDim != null) frozenDim.setAlpha(shownDim);
     }
-    private static void host(boolean ready, boolean temporary) {
+    private static void host(boolean ready, boolean temporary) { host(ready, temporary, false); }
+    /** visibilityOnly: only asks whether to show, without telling the host anything new. */
+    private static void host(boolean ready, boolean temporary, boolean visibilityOnly) {
         if (querying || context == null) return;
         querying = true;
         final long request = ++hostRequest, sceneGeneration = generation;
         Intent intent = new Intent("com.os4.musiccover.PROBE").setPackage("com.android.systemui")
-            .putExtra("frozenInAod", frozenInAod).putExtra("showInPill", showInPill).putExtra("backdropAllowed", backdropAllowed).putExtra("artworkFallback", artworkFallback).putExtra("op", "canvasframe").putExtra("ready", ready).putExtra("temporary", temporary).putExtra("track", currentTrack);
+            .putExtra("frozenInAod", frozenInAod).putExtra("showInPill", showInPill).putExtra("backdropAllowed", backdropAllowed).putExtra("artworkFallback", artworkFallback).putExtra("op", "canvasframe").putExtra("ready", ready).putExtra("temporary", temporary).putExtra("track", currentTrack)
+            .putExtra("visibilityOnly", visibilityOnly);
         BroadcastOptions options = BroadcastOptions.makeBasic(); options.setShareIdentityEnabled(true);
         context.sendOrderedBroadcast(intent, null, options.toBundle(), new BroadcastReceiver() {
             @Override public void onReceive(Context c, Intent i) {
                 if (request != hostRequest) return;
                 querying = false;
                 // A reply for a retired surface must not hide or pause the current Canvas.
-                if (sceneGeneration != generation) { host(firstFrame, false); return; }
+                if (sceneGeneration != generation) { host(firstFrame, false, visibilityOnly && !firstFrame); return; }
                 Bundle result = getResultExtras(false);
                 if (result != null && result.getBoolean("canvasBlocked")) {
                     presentationVisible = false;
@@ -406,6 +415,12 @@ final class CanvasBackground {
                 if (layer != null) layer.setVisibility(presentationVisible
                         && (!frozenInAod || frozenLayer == null) ? View.VISIBLE : View.INVISIBLE);
                 if (frozenLayer != null) frozenLayer.setVisibility(presentationVisible ? View.VISIBLE : View.INVISIBLE);
+                // Faded in only once the host says to show it: fading in on the first frame and
+                // hiding at this answer flashed the video on every wake with the player in the pill.
+                if (presentationVisible && firstFrame && layer != null && layer.getAlpha() < 1f) {
+                    layer.animate().alpha(1f).setDuration(200L).start();
+                    if (glVideo != null) glVideo.animate().alpha(1f).setDuration(200L).start();
+                }
                 worker.post(() -> {
                     try {
                         if (player == null || !firstFrame) return;
