@@ -40,6 +40,9 @@ final class CanvasBackground {
     private static FrameLayout frozenLayer;
     private static View frozenDim;
     private static android.graphics.Bitmap frozenBitmap;
+    /** The last frame shown before an unlock, held up while the same Canvas loads again. */
+    private static android.graphics.Bitmap handoffFrame;
+    private static String handoffTrack = "";
     private static volatile boolean frozenInAod;
     private static View dim;
     private static MediaPlayer player;
@@ -109,7 +112,7 @@ final class CanvasBackground {
                         if (enabled && !interactive && locked && firstFrame && presentationVisible) {
                             freezeForAod();
                             host(true, true);
-                        } else { clear(); host(false, temporary); }
+                        } else captureThen(() -> { clear(); host(false, temporary); });
                     });
                 } else {
                     delay = 700L;
@@ -230,7 +233,8 @@ final class CanvasBackground {
                         // Already told to show: no need to wait for the answer to fade in.
                         if (presentationVisible) {
                             layer.animate().alpha(1f).setDuration(200L).start();
-                            view.animate().alpha(1f).setDuration(200L).start();
+                            if (thawPending) view.setAlpha(1f);
+                            else view.animate().alpha(1f).setDuration(200L).start();
                         }
                     }
                     finishThaw();
@@ -278,6 +282,7 @@ final class CanvasBackground {
                 else fallbackToTexture("No GLES frame after 8 seconds");
             }
         }, 8000L);
+        showHandoff();
         android.util.Log.i("MCCanvas", "Renderer: " + (glVideo == null ? "TextureView" : "OpenGL ES"));
     }
     private static void fallbackToTexture(String reason) {
@@ -464,6 +469,51 @@ final class CanvasBackground {
                 out.write(System.currentTimeMillis() + " " + state + "\n");
             } catch (java.io.IOException ignored) { }
         });
+    }
+    /**
+     * Keeps the frame on screen before the Canvas is torn down at an unlock, so the next lock
+     * screen shows it while the video loads again instead of black. Waits at most 300ms.
+     */
+    private static void captureThen(Runnable done) {
+        if (!firstFrame || !presentationVisible || layer == null || currentTrack.isEmpty()) {
+            done.run();
+            return;
+        }
+        final String track = currentTrack;
+        final boolean[] ran = {false};
+        final Runnable once = () -> { if (!ran[0]) { ran[0] = true; done.run(); } };
+        java.util.function.Consumer<Bitmap> keep = bitmap -> {
+            if (bitmap != null) {
+                if (handoffFrame != null) handoffFrame.recycle();
+                handoffFrame = bitmap;
+                handoffTrack = track;
+            }
+            once.run();
+        };
+        if (glVideo != null) {
+            glVideo.snapshot(keep);
+            main.postDelayed(once, 300L);
+        } else if (texture != null && texture.isAvailable()) {
+            Bitmap bitmap = null;
+            try { bitmap = texture.getBitmap(); } catch (IllegalStateException ignored) { }
+            keep.accept(bitmap);
+        } else once.run();
+    }
+    /** Puts the held frame into a new layer for the same Canvas; the first frame takes it away. */
+    private static void showHandoff() {
+        Bitmap bitmap = handoffFrame;
+        if (bitmap == null || layer == null) return;
+        handoffFrame = null;
+        if (!handoffTrack.equals(currentTrack)) { bitmap.recycle(); return; }
+        dropFrozenFrame();
+        frozenBitmap = bitmap;
+        frozenImage = new android.widget.ImageView(layer.getContext());
+        frozenImage.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP);
+        frozenImage.setImageBitmap(bitmap);
+        layer.addView(frozenImage, 1, new FrameLayout.LayoutParams(-1, -1));
+        thawPending = true;
+        if (presentationVisible) layer.setAlpha(1f);
+        drawEffects();
     }
     private static void freezeForAod() {
         if (frozenInAod || videoView() == null || layer == null) return;
