@@ -40,6 +40,9 @@ final class CanvasBackground {
     private static FrameLayout frozenLayer;
     private static View frozenDim;
     private static android.graphics.Bitmap frozenBitmap;
+    /** The last frame shown before an unlock, held up while the same Canvas loads again. */
+    private static android.graphics.Bitmap handoffFrame;
+    private static String handoffTrack = "";
     private static volatile boolean frozenInAod;
     private static View dim;
     private static MediaPlayer player;
@@ -109,7 +112,7 @@ final class CanvasBackground {
                         if (enabled && !interactive && locked && firstFrame && presentationVisible) {
                             freezeForAod();
                             host(true, true);
-                        } else { clear(); host(false, temporary); }
+                        } else captureThen(() -> { clear(); host(false, temporary); });
                     });
                 } else {
                     delay = 700L;
@@ -171,6 +174,8 @@ final class CanvasBackground {
                             clear(); currentTrack = track; desired = url; ensureLayer(); playIfReady();
                         } else if (layer == null || !layer.isAttachedToWindow()) { clear(); currentTrack = track; desired = url; ensureLayer(); playIfReady(); }
                         if (firstFrame) host(true, false);
+                        // Hidden and frameless, it would never ask again: ask only whether to show.
+                        else if (layer != null && layer.getVisibility() != View.VISIBLE) host(false, false, true);
                         else if (desired.equals(failedUrl) && SystemClock.uptimeMillis() >= retryAt) playIfReady();
                         orderLayer();
                         effects();
@@ -213,6 +218,9 @@ final class CanvasBackground {
         layer = new FrameLayout(parent.getContext()); layer.setTag("HMCSpotifyCanvas");
         layer.setClickable(false); layer.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
         layer.setAlpha(0f);
+        // Hidden until the host says to show it: a visible video surface cuts a hole through
+        // SystemUI's window even at alpha 0, and the wake showed black behind the depth subject.
+        layer.setVisibility(presentationVisible ? View.VISIBLE : View.INVISIBLE);
         if (renderer == 1 && !glesFailed) {
             glVideo = new CanvasGlVideoView(parent.getContext(), new CanvasGlVideoView.Callback() {
                 @Override public void ready(CanvasGlVideoView view) {
@@ -222,7 +230,12 @@ final class CanvasBackground {
                     if (glVideo != view || layer == null) return;
                     if (!firstFrame) {
                         firstFrame = true; host(true, false); effects();
-                        layer.animate().alpha(1f).setDuration(200L).start();
+                        // Already told to show: no need to wait for the answer to fade in.
+                        if (presentationVisible) {
+                            layer.animate().alpha(1f).setDuration(200L).start();
+                            if (thawPending) view.setAlpha(1f);
+                            else view.animate().alpha(1f).setDuration(200L).start();
+                        }
                     }
                     finishThaw();
                 }
@@ -230,6 +243,9 @@ final class CanvasBackground {
                     if (glVideo == view) fallbackToTexture(reason);
                 }
             });
+            // Its own surface ignores the layer's alpha: before the first frame it showed as
+            // black over the wallpaper, for seconds while the song is paused.
+            glVideo.setAlpha(0f);
         } else {
             texture = new TextureView(parent.getContext());
             // Keep puhboo's opaque fix for the compatible renderer.
@@ -258,9 +274,15 @@ final class CanvasBackground {
                 new ViewGroup.LayoutParams(-1, -1));
         orderLayer();
         final CanvasGlVideoView pending = glVideo;
-        if (pending != null) main.postDelayed(() -> {
-            if (glVideo == pending && !firstFrame) fallbackToTexture("No GLES frame after 8 seconds");
+        if (pending != null) main.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (glVideo != pending || firstFrame) return;
+                // A hidden layer draws nothing; that is not the renderer failing.
+                if (layer == null || layer.getVisibility() != View.VISIBLE) main.postDelayed(this, 8000L);
+                else fallbackToTexture("No GLES frame after 8 seconds");
+            }
         }, 8000L);
+        showHandoff();
         android.util.Log.i("MCCanvas", "Renderer: " + (glVideo == null ? "TextureView" : "OpenGL ES"));
     }
     private static void fallbackToTexture(String reason) {
@@ -322,7 +344,7 @@ final class CanvasBackground {
                         if (token != generation || layer == null) return;
                         if (requestedGl == null) {
                             firstFrame = true; host(true, false); effects();
-                            layer.animate().alpha(1f).setDuration(200L).start();
+                            if (presentationVisible) layer.animate().alpha(1f).setDuration(200L).start();
                         }
                     });
                     }
@@ -381,19 +403,22 @@ final class CanvasBackground {
         if (frozenImage != null) frozenImage.setRenderEffect(effect);
         if (frozenDim != null) frozenDim.setAlpha(shownDim);
     }
-    private static void host(boolean ready, boolean temporary) {
+    private static void host(boolean ready, boolean temporary) { host(ready, temporary, false); }
+    /** visibilityOnly: only asks whether to show, without telling the host anything new. */
+    private static void host(boolean ready, boolean temporary, boolean visibilityOnly) {
         if (querying || context == null) return;
         querying = true;
         final long request = ++hostRequest, sceneGeneration = generation;
         Intent intent = new Intent("com.os4.musiccover.PROBE").setPackage("com.android.systemui")
-            .putExtra("frozenInAod", frozenInAod).putExtra("showInPill", showInPill).putExtra("backdropAllowed", backdropAllowed).putExtra("artworkFallback", artworkFallback).putExtra("op", "canvasframe").putExtra("ready", ready).putExtra("temporary", temporary).putExtra("track", currentTrack);
+            .putExtra("frozenInAod", frozenInAod).putExtra("showInPill", showInPill).putExtra("backdropAllowed", backdropAllowed).putExtra("artworkFallback", artworkFallback).putExtra("op", "canvasframe").putExtra("ready", ready).putExtra("temporary", temporary).putExtra("track", currentTrack)
+            .putExtra("visibilityOnly", visibilityOnly);
         BroadcastOptions options = BroadcastOptions.makeBasic(); options.setShareIdentityEnabled(true);
         context.sendOrderedBroadcast(intent, null, options.toBundle(), new BroadcastReceiver() {
             @Override public void onReceive(Context c, Intent i) {
                 if (request != hostRequest) return;
                 querying = false;
                 // A reply for a retired surface must not hide or pause the current Canvas.
-                if (sceneGeneration != generation) { host(firstFrame, false); return; }
+                if (sceneGeneration != generation) { host(firstFrame, false, visibilityOnly && !firstFrame); return; }
                 Bundle result = getResultExtras(false);
                 if (result != null && result.getBoolean("canvasBlocked")) {
                     presentationVisible = false;
@@ -406,6 +431,12 @@ final class CanvasBackground {
                 if (layer != null) layer.setVisibility(presentationVisible
                         && (!frozenInAod || frozenLayer == null) ? View.VISIBLE : View.INVISIBLE);
                 if (frozenLayer != null) frozenLayer.setVisibility(presentationVisible ? View.VISIBLE : View.INVISIBLE);
+                // Faded in only once the host says to show it: fading in on the first frame and
+                // hiding at this answer flashed the video on every wake with the player in the pill.
+                if (presentationVisible && firstFrame && layer != null && layer.getAlpha() < 1f) {
+                    layer.animate().alpha(1f).setDuration(200L).start();
+                    if (glVideo != null) glVideo.animate().alpha(1f).setDuration(200L).start();
+                }
                 worker.post(() -> {
                     try {
                         if (player == null || !firstFrame) return;
@@ -438,6 +469,51 @@ final class CanvasBackground {
                 out.write(System.currentTimeMillis() + " " + state + "\n");
             } catch (java.io.IOException ignored) { }
         });
+    }
+    /**
+     * Keeps the frame on screen before the Canvas is torn down at an unlock, so the next lock
+     * screen shows it while the video loads again instead of black. Waits at most 300ms.
+     */
+    private static void captureThen(Runnable done) {
+        if (!firstFrame || !presentationVisible || layer == null || currentTrack.isEmpty()) {
+            done.run();
+            return;
+        }
+        final String track = currentTrack;
+        final boolean[] ran = {false};
+        final Runnable once = () -> { if (!ran[0]) { ran[0] = true; done.run(); } };
+        java.util.function.Consumer<Bitmap> keep = bitmap -> {
+            if (bitmap != null) {
+                if (handoffFrame != null) handoffFrame.recycle();
+                handoffFrame = bitmap;
+                handoffTrack = track;
+            }
+            once.run();
+        };
+        if (glVideo != null) {
+            glVideo.snapshot(keep);
+            main.postDelayed(once, 300L);
+        } else if (texture != null && texture.isAvailable()) {
+            Bitmap bitmap = null;
+            try { bitmap = texture.getBitmap(); } catch (IllegalStateException ignored) { }
+            keep.accept(bitmap);
+        } else once.run();
+    }
+    /** Puts the held frame into a new layer for the same Canvas; the first frame takes it away. */
+    private static void showHandoff() {
+        Bitmap bitmap = handoffFrame;
+        if (bitmap == null || layer == null) return;
+        handoffFrame = null;
+        if (!handoffTrack.equals(currentTrack)) { bitmap.recycle(); return; }
+        dropFrozenFrame();
+        frozenBitmap = bitmap;
+        frozenImage = new android.widget.ImageView(layer.getContext());
+        frozenImage.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP);
+        frozenImage.setImageBitmap(bitmap);
+        layer.addView(frozenImage, 1, new FrameLayout.LayoutParams(-1, -1));
+        thawPending = true;
+        if (presentationVisible) layer.setAlpha(1f);
+        drawEffects();
     }
     private static void freezeForAod() {
         if (frozenInAod || videoView() == null || layer == null) return;
