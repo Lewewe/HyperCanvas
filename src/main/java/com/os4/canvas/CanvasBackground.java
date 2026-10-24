@@ -227,6 +227,11 @@ final class CanvasBackground {
                     if (glVideo != view || layer == null) return;
                     if (!firstFrame) {
                         firstFrame = true; host(true, false); effects();
+                        // Already told to show: no need to wait for the answer to fade in.
+                        if (presentationVisible) {
+                            layer.animate().alpha(1f).setDuration(200L).start();
+                            view.animate().alpha(1f).setDuration(200L).start();
+                        }
                     }
                     finishThaw();
                 }
@@ -265,8 +270,13 @@ final class CanvasBackground {
                 new ViewGroup.LayoutParams(-1, -1));
         orderLayer();
         final CanvasGlVideoView pending = glVideo;
-        if (pending != null) main.postDelayed(() -> {
-            if (glVideo == pending && !firstFrame) fallbackToTexture("No GLES frame after 8 seconds");
+        if (pending != null) main.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (glVideo != pending || firstFrame) return;
+                // A hidden layer draws nothing; that is not the renderer failing.
+                if (layer == null || layer.getVisibility() != View.VISIBLE) main.postDelayed(this, 8000L);
+                else fallbackToTexture("No GLES frame after 8 seconds");
+            }
         }, 8000L);
         android.util.Log.i("MCCanvas", "Renderer: " + (glVideo == null ? "TextureView" : "OpenGL ES"));
     }
@@ -329,6 +339,7 @@ final class CanvasBackground {
                         if (token != generation || layer == null) return;
                         if (requestedGl == null) {
                             firstFrame = true; host(true, false); effects();
+                            if (presentationVisible) layer.animate().alpha(1f).setDuration(200L).start();
                         }
                     });
                     }
