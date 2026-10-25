@@ -38,6 +38,9 @@ final class CanvasBackground {
     private static View videoView() { return glVideo != null ? glVideo : texture; }
     private static android.widget.ImageView frozenImage;
     private static FrameLayout frozenLayer;
+    /** The layer playing out its fade for a track without Canvas, if one is. */
+    private static FrameLayout fadingLayer;
+    private static final long FADE_HOLD_MS = 350L, FADE_OUT_MS = 350L;
     private static View frozenDim;
     private static android.graphics.Bitmap frozenBitmap;
     /** The last frame shown before an unlock, held up while the same Canvas loads again. */
@@ -160,7 +163,7 @@ final class CanvasBackground {
                     Bundle result = context.getContentResolver().call(CanvasProvider.URI, "query", track, null);
                     String url = result == null ? "" : result.getString("url", "");
                     boolean temporary = selected == null;
-                    if (!url.equals(CanvasProvider.URI + "/video/" + (track.isEmpty() ? "" : track.substring(14)))) main.post(() -> { backdropAllowed = true; artworkFallback = !temporary && !track.isEmpty(); clear(); host(false, temporary); });
+                    if (!url.equals(CanvasProvider.URI + "/video/" + (track.isEmpty() ? "" : track.substring(14)))) main.post(() -> { backdropAllowed = true; artworkFallback = !temporary && !track.isEmpty(); fadeOutThenClear(); host(false, temporary); });
                     else main.post(() -> {
                         int selectedRenderer = config.getInt("renderer", 0) == 1 ? 1 : 0;
                         if (renderer != selectedRenderer) {
@@ -231,11 +234,7 @@ final class CanvasBackground {
                     if (!firstFrame) {
                         firstFrame = true; host(true, false); effects();
                         // Already told to show: no need to wait for the answer to fade in.
-                        if (presentationVisible) {
-                            layer.animate().alpha(1f).setDuration(200L).start();
-                            if (thawPending) view.setAlpha(1f);
-                            else view.animate().alpha(1f).setDuration(200L).start();
-                        }
+                        if (presentationVisible) fadeIn();
                     }
                     finishThaw();
                 }
@@ -344,7 +343,7 @@ final class CanvasBackground {
                         if (token != generation || layer == null) return;
                         if (requestedGl == null) {
                             firstFrame = true; host(true, false); effects();
-                            if (presentationVisible) layer.animate().alpha(1f).setDuration(200L).start();
+                            if (presentationVisible) fadeIn();
                         }
                     });
                     }
@@ -368,6 +367,19 @@ final class CanvasBackground {
         float scale = Math.max(w / videoW, h / videoH);
         Matrix matrix = new Matrix(); matrix.setScale(videoW * scale / w, videoH * scale / h, w / 2f, h / 2f);
         texture.setTransform(matrix);
+    }
+    private static final long FADE_IN_MS = 500L;
+    /**
+     * Brings the video in over the frosted artwork the wallpaper already shows, slower than the
+     * 200ms it had, so the light cover turns into the dark video instead of flashing to it. Not
+     * out of focus as well: the GL blur at that radius drew blotches (2026-10-25).
+     */
+    private static void fadeIn() {
+        if (layer == null) return;
+        layer.animate().alpha(1f).setDuration(FADE_IN_MS).start();
+        if (glVideo == null) return;
+        if (thawPending) glVideo.setAlpha(1f);
+        else glVideo.animate().alpha(1f).setDuration(FADE_IN_MS).start();
     }
     private static void effects() {
         if (videoView() == null || dim == null) return;
@@ -433,10 +445,7 @@ final class CanvasBackground {
                 if (frozenLayer != null) frozenLayer.setVisibility(presentationVisible ? View.VISIBLE : View.INVISIBLE);
                 // Faded in only once the host says to show it: fading in on the first frame and
                 // hiding at this answer flashed the video on every wake with the player in the pill.
-                if (presentationVisible && firstFrame && layer != null && layer.getAlpha() < 1f) {
-                    layer.animate().alpha(1f).setDuration(200L).start();
-                    if (glVideo != null) glVideo.animate().alpha(1f).setDuration(200L).start();
-                }
+                if (presentationVisible && firstFrame && layer != null && layer != fadingLayer && layer.getAlpha() < 1f) fadeIn();
                 worker.post(() -> {
                     try {
                         if (player == null || !firstFrame) return;
@@ -605,7 +614,35 @@ final class CanvasBackground {
         frozenLayer = null; frozenDim = null;
         if (frozenBitmap != null) { frozenBitmap.recycle(); frozenBitmap = null; }
     }
+    /**
+     * The next track has no Canvas. Cut away, the video left the wallpaper's own change exposed:
+     * the outgoing track's frosted artwork, light enough to read as a flash, for the 0.6-0.7s
+     * the next one takes to land. So the video plays on over that, then fades.
+     * shortcut: fixed times measured on a Xiaomi 17 Pro, not the wallpaper's own signal; take
+     * that from the host if another phone lands slower.
+     */
+    private static void fadeOutThenClear() {
+        final FrameLayout old = layer;
+        if (old == null || !firstFrame || !presentationVisible || old.getVisibility() != View.VISIBLE) {
+            clear();
+            return;
+        }
+        if (fadingLayer == old) return;
+        fadingLayer = old;
+        // Keyed to the layer alone: playIfReady() moves `generation` on a mere surface rebuild,
+        // and a fade that bailed on that left fadingLayer set - every later track kept the video.
+        main.postDelayed(() -> {
+            if (layer != old) return;
+            // The GL surface ignores its parent's alpha, so it fades on its own.
+            if (glVideo != null) glVideo.animate().alpha(0f).setDuration(FADE_OUT_MS).start();
+            old.animate().alpha(0f).setDuration(FADE_OUT_MS).start();
+        }, FADE_HOLD_MS);
+        // On a timer of its own, not the animation's end: another animate() on the layer cancels
+        // that end action, and the video then stayed on every track after.
+        main.postDelayed(() -> { if (layer == old) clear(); }, FADE_HOLD_MS + FADE_OUT_MS);
+    }
     private static void clear() {
+        fadingLayer = null;
         ++freezeGeneration;
         frozenInAod = thawPending = false;
         dropFrozenFrame();
