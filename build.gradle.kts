@@ -8,8 +8,8 @@ android {
         applicationId = "com.yzc26623.HyperCanvas"
         minSdk = 35
         targetSdk = 37
-        versionCode = 3
-        versionName = "0.1.2-beta"
+        versionCode = 4
+        versionName = "0.1.3-beta"
     }
     buildFeatures { buildConfig = true }
     signingConfigs {
