@@ -1,6 +1,7 @@
 <p align="center"><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
 
 <div align="center">
+  <img src="docs/images/app-icon.png" alt="HyperCanvas app icon" width="128" height="128" />
   <h1>HyperCanvas</h1>
   <p><strong>Spotify Canvas video backgrounds on the HyperOS 4 lock screen.</strong></p>
   <p>

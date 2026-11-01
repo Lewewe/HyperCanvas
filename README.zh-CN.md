@@ -1,6 +1,7 @@
 <p align="center"><a href="README.md">English</a> · <strong>简体中文</strong></p>
 
 <div align="center">
+  <img src="docs/images/app-icon.png" alt="HyperCanvas 应用图标" width="128" height="128" />
   <h1>HyperCanvas</h1>
   <p><strong>为 HyperOS 4 锁屏带来 Spotify Canvas 视频背景。</strong></p>
   <p>
