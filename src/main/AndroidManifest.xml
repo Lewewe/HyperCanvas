@@ -5,7 +5,7 @@
         <package android:name="com.yzc26623.HyperMusicCoverEnhanced" />
         <package android:name="com.spotify.music" />
     </queries>
-    <application android:name=".CanvasApplication" android:label="HyperCanvas" android:description="@string/module_description"
+    <application android:name=".CanvasApplication" android:label="HyperCanvas" android:icon="@mipmap/ic_launcher" android:description="@string/module_description"
         android:allowBackup="false" android:usesCleartextTraffic="false">
         <activity android:name=".ActivationActivity" android:exported="true"
             android:excludeFromRecents="true" android:theme="@android:style/Theme.NoDisplay" />
