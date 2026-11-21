@@ -12,6 +12,7 @@ import java.io.FileNotFoundException;
 public final class CanvasProvider extends ContentProvider {
     public static final Uri URI = Uri.parse("content://com.yzc26623.HyperCanvas.bridge");
     private static final String HOST = "com.yzc26623.HyperMusicCoverEnhanced";
+    private static final String MANAGE_EXTENSION = "com.yzc26623.HyperCanvas.permission.MANAGE_EXTENSION";
     private SharedPreferences prefs;
     @Override public boolean onCreate() {
         prefs = getContext().getSharedPreferences("canvas", 0);
@@ -43,7 +44,13 @@ public final class CanvasProvider extends ContentProvider {
         return false;
     }
     private boolean host() {
-        return caller(HOST) && getContext().getPackageManager().checkSignatures(HOST, getContext().getPackageName()) == android.content.pm.PackageManager.SIGNATURE_MATCH;
+        Context context = getContext();
+        // HyperOS can hide a known package from provider-side AppOps during a fresh install.
+        if (Binder.getCallingUid() >= android.os.Process.FIRST_APPLICATION_UID
+            && context.checkCallingPermission(MANAGE_EXTENSION) == android.content.pm.PackageManager.PERMISSION_GRANTED)
+            return true;
+        return caller(HOST) && context.getPackageManager().checkSignatures(HOST, context.getPackageName())
+            == android.content.pm.PackageManager.SIGNATURE_MATCH;
     }
     private boolean enabled() {
         return CanvasPolicy.enabled(prefs.getBoolean("enabled", false), prefs.getBoolean("hostBlocked", false));
